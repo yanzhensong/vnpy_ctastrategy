@@ -52,7 +52,7 @@ from .base import (
     StopOrderStatus,
     STOPORDER_PREFIX
 )
-from .template import CtaTemplate
+from .template import CtaTemplate, TargetPosTemplate
 
 
 # 停止单状态映射
@@ -86,7 +86,7 @@ class CtaEngine(BaseEngine):
 
         self.symbol_strategy_map: defaultdict = defaultdict(list)       # vt_symbol: strategy list
         self.orderid_strategy_map: dict = {}                            # vt_orderid: strategy
-        self.strategy_orderid_map: defaultdict = defaultdict(set)       # strategy_name: orderid list
+        self.strategy_orderid_map: defaultdict = defaultdict(set)       # strategy_name: orderid set
 
         self.stop_order_count: int = 0                                  # for generating stop_orderid
         self.stop_orders: Dict[str, StopOrder] = {}                     # stop_orderid: stop_order
@@ -164,7 +164,7 @@ class CtaEngine(BaseEngine):
             return
 
         # Remove vt_orderid if order is no longer active.
-        vt_orderids: list = self.strategy_orderid_map[strategy.strategy_name]
+        vt_orderids: set = self.strategy_orderid_map[strategy.strategy_name]
         if order.vt_orderid in vt_orderids and not order.is_active():
             vt_orderids.remove(order.vt_orderid)
 
@@ -262,7 +262,7 @@ class CtaEngine(BaseEngine):
                     # Remove from relation map.
                     self.stop_orders.pop(stop_order.stop_orderid)
 
-                    strategy_vt_orderids: list = self.strategy_orderid_map[strategy.strategy_name]
+                    strategy_vt_orderids: set = self.strategy_orderid_map[strategy.strategy_name]
                     if stop_order.stop_orderid in strategy_vt_orderids:
                         strategy_vt_orderids.remove(stop_order.stop_orderid)
 
@@ -416,7 +416,7 @@ class CtaEngine(BaseEngine):
 
         self.stop_orders[stop_orderid] = stop_order
 
-        vt_orderids: list = self.strategy_orderid_map[strategy.strategy_name]
+        vt_orderids: set = self.strategy_orderid_map[strategy.strategy_name]
         vt_orderids.add(stop_orderid)
 
         self.call_strategy_func(strategy, strategy.on_stop_order, stop_order)
@@ -448,7 +448,7 @@ class CtaEngine(BaseEngine):
         # Remove from relation map.
         self.stop_orders.pop(stop_orderid)
 
-        vt_orderids: list = self.strategy_orderid_map[strategy.strategy_name]
+        vt_orderids: set = self.strategy_orderid_map[strategy.strategy_name]
         if stop_orderid in vt_orderids:
             vt_orderids.remove(stop_orderid)
 
@@ -506,7 +506,7 @@ class CtaEngine(BaseEngine):
         """
         Cancel all active orders of a strategy.
         """
-        vt_orderids: list = self.strategy_orderid_map[strategy.strategy_name]
+        vt_orderids: set = self.strategy_orderid_map[strategy.strategy_name]
         if not vt_orderids:
             return
 
@@ -779,7 +779,7 @@ class CtaEngine(BaseEngine):
 
         # Remove from active orderid map
         if strategy_name in self.strategy_orderid_map:
-            vt_orderids: list = self.strategy_orderid_map.pop(strategy_name)
+            vt_orderids: set = self.strategy_orderid_map.pop(strategy_name)
 
             # Remove vt_orderid strategy map
             for vt_orderid in vt_orderids:
@@ -825,7 +825,11 @@ class CtaEngine(BaseEngine):
 
             for name in dir(module):
                 value = getattr(module, name)
-                if (isinstance(value, type) and issubclass(value, CtaTemplate) and value is not CtaTemplate):
+                if (
+                    isinstance(value, type)
+                    and issubclass(value, CtaTemplate)
+                    and value not in {CtaTemplate, TargetPosTemplate}
+                ):
                     self.classes[value.__name__] = value
         except:  # noqa
             msg: str = f"策略文件{module_name}加载失败，触发异常：\n{traceback.format_exc()}"
@@ -929,6 +933,9 @@ class CtaEngine(BaseEngine):
 
         self.strategy_setting.pop(strategy_name)
         save_json(self.setting_filename, self.strategy_setting)
+
+        self.strategy_data.pop(strategy_name, None)
+        save_json(self.data_filename, self.strategy_data)
 
     def put_stop_order_event(self, stop_order: StopOrder) -> None:
         """

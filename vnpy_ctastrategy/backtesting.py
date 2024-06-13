@@ -6,14 +6,20 @@ import traceback
 
 import numpy as np
 from pandas import DataFrame, Series
+from pandas.core.window import ExponentialMovingWindow
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from vnpy.trader.constant import (Direction, Offset, Exchange,
-                                  Interval, Status)
+from vnpy.trader.constant import (
+    Direction,
+    Offset,
+    Exchange,
+    Interval,
+    Status
+)
 from vnpy.trader.database import get_database, BaseDatabase
 from vnpy.trader.object import OrderData, TradeData, BarData, TickData
-from vnpy.trader.utility import round_to
+from vnpy.trader.utility import round_to, extract_vt_symbol
 from vnpy.trader.optimize import (
     OptimizationSetting,
     check_optimization_setting,
@@ -52,6 +58,7 @@ class BacktestingEngine:
         self.capital: int = 1_000_000
         self.risk_free: float = 0
         self.annual_days: int = 240
+        self.half_life: int = 120
         self.mode: BacktestingMode = BacktestingMode.BAR
 
         self.strategy_class: Type[CtaTemplate] = None
@@ -117,7 +124,8 @@ class BacktestingEngine:
         end: datetime = None,
         mode: BacktestingMode = BacktestingMode.BAR,
         risk_free: float = 0,
-        annual_days: int = 240
+        annual_days: int = 240,
+        half_life: int = 120
     ) -> None:
         """"""
         self.mode = mode
@@ -133,10 +141,15 @@ class BacktestingEngine:
         self.exchange = Exchange(exchange_str)
 
         self.capital = capital
-        self.end = end
+
+        if not end:
+            end = datetime.now()
+        self.end = end.replace(hour=23, minute=59, second=59)
+
         self.mode = mode
         self.risk_free = risk_free
         self.annual_days = annual_days
+        self.half_life = half_life
 
     def add_strategy(self, strategy_class: Type[CtaTemplate], setting: dict) -> None:
         """"""
@@ -208,26 +221,6 @@ class BacktestingEngine:
             func = self.new_tick
 
         self.strategy.on_init()
-
-        # Use the first [days] of history data for initializing strategy
-        day_count: int = 0
-        ix: int = 0
-
-        for ix, data in enumerate(self.history_data):
-            if self.datetime and data.datetime.day != self.datetime.day:
-                day_count += 1
-                if day_count >= self.days:
-                    break
-
-            self.datetime = data.datetime
-
-            try:
-                self.callback(data)
-            except Exception:
-                self.output("触发异常，回测终止")
-                self.output(traceback.format_exc())
-                return
-
         self.strategy.inited = True
         self.output("策略初始化完成")
 
@@ -235,17 +228,11 @@ class BacktestingEngine:
         self.strategy.trading = True
         self.output("开始回放历史数据")
 
-        # Use the rest of history data for running backtesting
-        backtesting_data: list = self.history_data[ix:]
-        if len(backtesting_data) <= 1:
-            self.output("历史数据不足，回测终止")
-            return
-
-        total_size: int = len(backtesting_data)
+        total_size: int = len(self.history_data)
         batch_size: int = max(int(total_size / 10), 1)
 
         for ix, i in enumerate(range(0, total_size, batch_size)):
-            batch_data: list = backtesting_data[i: i + batch_size]
+            batch_data: list = self.history_data[i: i + batch_size]
             for data in batch_data:
                 try:
                     func(data)
@@ -266,8 +253,7 @@ class BacktestingEngine:
         self.output("开始计算逐日盯市盈亏")
 
         if not self.trades:
-            self.output("成交记录为空，无法计算")
-            return
+            self.output("回测成交记录为空")
 
         # Add trade data into daily reuslt.
         for trade in self.trades.values():
@@ -336,6 +322,7 @@ class BacktestingEngine:
         daily_return: float = 0
         return_std: float = 0
         sharpe_ratio: float = 0
+        ewm_sharpe: float = 0
         return_drawdown_ratio: float = 0
 
         # Check if balance is always positive
@@ -352,10 +339,7 @@ class BacktestingEngine:
             x[x <= 0] = np.nan
             df["return"] = np.log(x).fillna(0)
 
-            df["highlevel"] = (
-                df["balance"].rolling(
-                    min_periods=1, window=len(df), center=False).max()
-            )
+            df["highlevel"] = df["balance"].rolling(min_periods=1, window=len(df), center=False).max()
             df["drawdown"] = df["balance"] - df["highlevel"]
             df["ddpercent"] = df["drawdown"] / df["highlevel"] * 100
 
@@ -408,8 +392,14 @@ class BacktestingEngine:
             if return_std:
                 daily_risk_free: float = self.risk_free / np.sqrt(self.annual_days)
                 sharpe_ratio: float = (daily_return - daily_risk_free) / return_std * np.sqrt(self.annual_days)
+
+                ewm_window: ExponentialMovingWindow = df["return"].ewm(halflife=self.half_life)
+                ewm_mean: Series = ewm_window.mean() * 100
+                ewm_std: Series = ewm_window.std() * 100
+                ewm_sharpe: float = ((ewm_mean - daily_risk_free) / ewm_std)[-1] * np.sqrt(self.annual_days)
             else:
                 sharpe_ratio: float = 0
+                ewm_sharpe: float = 0
 
             if max_ddpercent:
                 return_drawdown_ratio: float = -total_return / max_ddpercent
@@ -450,6 +440,7 @@ class BacktestingEngine:
             self.output(f"日均收益率：\t{daily_return:,.2f}%")
             self.output(f"收益标准差：\t{return_std:,.2f}%")
             self.output(f"Sharpe Ratio：\t{sharpe_ratio:,.2f}")
+            self.output(f"EWM Sharpe：\t{ewm_sharpe:,.2f}")
             self.output(f"收益回撤比：\t{return_drawdown_ratio:,.2f}")
 
         statistics: dict = {
@@ -478,6 +469,7 @@ class BacktestingEngine:
             "daily_return": daily_return,
             "return_std": return_std,
             "sharpe_ratio": sharpe_ratio,
+            "ewm_sharpe": ewm_sharpe,
             "return_drawdown_ratio": return_drawdown_ratio,
         }
 
@@ -490,7 +482,8 @@ class BacktestingEngine:
         self.output("策略统计指标计算完成")
         return statistics
 
-    def show_chart(self, df: DataFrame = None) -> None:
+    # def show_chart(self, df: DataFrame = None) -> None:
+    def show_chart(self, df: DataFrame = None) -> go.Figure:
         """"""
         # Check DataFrame input exterior
         if df is None:
@@ -531,7 +524,7 @@ class BacktestingEngine:
         fig.add_trace(pnl_histogram, row=4, col=1)
 
         fig.update_layout(height=1000, width=1000)
-        fig.show()
+        return fig
 
     def run_bf_optimization(
         self,
@@ -565,7 +558,8 @@ class BacktestingEngine:
         self,
         optimization_setting: OptimizationSetting,
         output: bool = True,
-        max_workers: int = None
+        max_workers: int = None,
+        ngen_size: int = 30
     ) -> list:
         """"""
         if not check_optimization_setting(optimization_setting):
@@ -577,6 +571,7 @@ class BacktestingEngine:
             optimization_setting,
             get_target_value,
             max_workers=max_workers,
+            ngen_size=ngen_size,
             output=self.output
         )
 
@@ -789,15 +784,40 @@ class BacktestingEngine:
         use_database: bool
     ) -> List[BarData]:
         """"""
-        self.days = days
         self.callback = callback
-        return []
+
+        init_end = self.start - INTERVAL_DELTA_MAP[interval]
+        init_start = self.start - timedelta(days=days)
+
+        symbol, exchange = extract_vt_symbol(vt_symbol)
+
+        bars: List[BarData] = load_bar_data(
+            symbol,
+            exchange,
+            interval,
+            init_start,
+            init_end
+        )
+
+        return bars
 
     def load_tick(self, vt_symbol: str, days: int, callback: Callable) -> List[TickData]:
         """"""
-        self.days = days
         self.callback = callback
-        return []
+
+        init_end = self.start - timedelta(seconds=1)
+        init_start = self.start - timedelta(days=days)
+
+        symbol, exchange = extract_vt_symbol(vt_symbol)
+
+        ticks: List[TickData] = load_tick_data(
+            symbol,
+            exchange,
+            init_start,
+            init_end
+        )
+
+        return ticks
 
     def send_order(
         self,
@@ -1124,7 +1144,7 @@ def evaluate(
     statistics: dict = engine.calculate_statistics(output=False)
 
     target_value: float = statistics[target_name]
-    return (str(setting), target_value, statistics)
+    return (setting, target_value, statistics)
 
 
 def wrap_evaluate(engine: BacktestingEngine, target_name: str) -> callable:
