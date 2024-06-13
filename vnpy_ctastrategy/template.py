@@ -1,9 +1,9 @@
 from abc import ABC
 from copy import copy
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Optional
 
 from vnpy.trader.constant import Interval, Direction, Offset
-from vnpy.trader.object import BarData, TickData, OrderData, TradeData
+from vnpy.trader.object import BarData, TickData, OrderData, TradeData, AccountData
 from vnpy.trader.utility import virtual
 
 from .base import StopOrder, EngineType
@@ -289,6 +289,9 @@ class CtaTemplate(ABC):
         Return size data of trading contract.
         """
         return self.cta_engine.get_size(self)
+
+    def get_account(self) -> Optional[AccountData]:
+        return self.cta_engine.get_account()
 
     def load_bar(
         self,

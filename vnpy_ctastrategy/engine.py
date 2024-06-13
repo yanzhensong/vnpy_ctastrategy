@@ -23,6 +23,7 @@ from vnpy.trader.object import (
     OrderData,
     TradeData,
     ContractData,
+    AccountData,
 )
 from vnpy.trader.event import (
     EVENT_TICK,
@@ -537,6 +538,16 @@ class CtaEngine(BaseEngine):
             return contract.size
         else:
             return None
+
+    def get_account(self) -> Optional[AccountData]:
+        """
+        Get latest account data by vt_accountid. We accume there is only one account.
+        """
+        accounts = self.main_engine.get_all_accounts()
+        if len(accounts) == 0:
+            return None
+        else:
+            return accounts[0]
 
     def load_bar(
         self,
